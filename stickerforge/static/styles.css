@@ -285,3 +285,16 @@ body {
 .fps-select { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
 
 .check.small { font-size: 12px; margin-top: 8px; }
+
+/* ---------- source counter + pack list ---------- */
+.counter { font-size: 13px; color: var(--ink); margin: 12px 0 0; padding: 8px 10px; background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; }
+.counter-sub { color: var(--muted); }
+.counter-warn { margin-top: 4px; font-size: 12px; color: #b45309; }
+.pack-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.pack-row { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.pack-row.active { border-color: var(--wa-light); box-shadow: 0 0 0 1px var(--wa-light) inset; }
+.pack-row img { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; background: #eef2f7; flex: none; }
+.pack-row-meta { flex: 1; min-width: 0; }
+.pack-row-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pack-row-sub { font-size: 11px; color: var(--muted); }
+.mini.link { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; color: var(--ink); }

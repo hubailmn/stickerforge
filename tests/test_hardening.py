@@ -114,3 +114,82 @@ class ExpiringStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PackPlanTests(unittest.TestCase):
+    def test_sizes_respect_whatsapp_limits(self):
+        from stickerforge.pack import plan_pack_sizes
+
+        self.assertEqual(plan_pack_sizes(0), [])
+        self.assertEqual(plan_pack_sizes(1), [1])
+        self.assertEqual(plan_pack_sizes(30), [30])
+        self.assertEqual(plan_pack_sizes(31), [16, 15])
+        self.assertEqual(plan_pack_sizes(61), [21, 20, 20])
+        for count in range(1, 200):
+            sizes = plan_pack_sizes(count)
+            self.assertEqual(sum(sizes), count)
+            self.assertTrue(all(size <= 30 for size in sizes))
+            if len(sizes) > 1:
+                self.assertGreaterEqual(min(sizes), 15)
+
+
+def _unique_gif(index, frames=2):
+    import io
+
+    from PIL import Image, ImageDraw
+
+    images = []
+    for frame in range(frames):
+        image = Image.new("RGBA", (120, 120), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle([index, 10 + frame * 5, index + 40, 60], fill=(index * 7 % 256, 90, 200, 255))
+        images.append(image)
+    buffer = io.BytesIO()
+    images[0].save(buffer, format="GIF", save_all=True, append_images=images[1:], duration=100, loop=0)
+    return buffer.getvalue()
+
+
+def _unique_png(index):
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGBA", (64, 64), (index * 9 % 256, 30, 30, 255)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class PackSplitTests(unittest.TestCase):
+    def build(self, files, title="Split"):
+        import io
+
+        data = {"title": title, "files": [(io.BytesIO(blob), name) for name, blob in files]}
+        response = app.test_client().post("/api/build", data=data, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 200, response.data)
+        return response.get_json()
+
+    def test_31_animated_stickers_split_into_two_packs(self):
+        files = [(f"a{i}.gif", _unique_gif(i)) for i in range(31)]
+        result = self.build(files)
+        self.assertEqual([p["count"] for p in result["packs"]], [16, 15])
+        self.assertEqual(result["total_stickers"], 31)
+        self.assertEqual([p["title"] for p in result["packs"]], ["Split (1/2)", "Split (2/2)"])
+        self.assertTrue(all(p["animated"] for p in result["packs"]))
+
+    def test_static_and_animated_are_never_mixed_in_a_pack(self):
+        files = [
+            ("s1.png", _unique_png(1)),
+            ("s2.png", _unique_png(2)),
+            ("a1.gif", _unique_gif(1)),
+            ("a2.gif", _unique_gif(2)),
+        ]
+        result = self.build(files)
+        kinds = sorted((p["animated"], p["count"]) for p in result["packs"])
+        self.assertEqual(kinds, [(False, 2), (True, 2)])
+        self.assertTrue(any("at least 3" in w for w in result["warnings"]))
+
+    def test_identical_content_is_converted_once(self):
+        blob = _unique_gif(5)
+        result = self.build([("one.gif", blob), ("two.gif", blob)])
+        self.assertEqual(result["total_stickers"], 1)
+        self.assertTrue(any("duplicate" in w for w in result["warnings"]))

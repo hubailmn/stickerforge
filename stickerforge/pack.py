@@ -57,3 +57,16 @@ def build_archive(
 
 def names_for(count: int) -> List[str]:
     return [sticker_filename(i) for i in range(count)]
+
+
+def plan_pack_sizes(count: int, max_size: int = config.MAX_STICKERS) -> List[int]:
+    """Split `count` stickers into the fewest packs of at most `max_size`.
+
+    Sizes are balanced so no pack is left with only a sticker or two:
+    31 stickers become [16, 15], not [30, 1].
+    """
+    if count <= 0:
+        return []
+    packs = -(-count // max_size)  # ceiling division
+    base, extra = divmod(count, packs)
+    return [base + 1] * extra + [base] * (packs - extra)

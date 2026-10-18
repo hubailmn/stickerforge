@@ -8,7 +8,7 @@ import sys
 from . import config
 from .converter import convert
 from .fetcher import FetchError, fetch
-from .pack import build_archive, build_cover, sticker_filename
+from .pack import build_archive, build_cover, plan_pack_sizes, sticker_filename
 
 
 def _read_list_file(path: str):
@@ -49,16 +49,9 @@ def main(argv=None) -> int:
         print("error: no sources given", file=sys.stderr)
         return 2
 
-    if len(sources) > config.MAX_STICKERS:
-        print(
-            f"note: WhatsApp packs hold {config.MAX_STICKERS} stickers; "
-            f"using the first {config.MAX_STICKERS}",
-            file=sys.stderr,
-        )
-        sources = sources[: config.MAX_STICKERS]
+    sources = list(dict.fromkeys(sources))  # same link twice counts once
 
-    sticker_files = []
-    cover_source = None
+    converted = []  # (animated, data, cover-worthy source label)
     failures = 0
     for index, source in enumerate(sources):
         try:
@@ -80,24 +73,43 @@ def main(argv=None) -> int:
             print(f"  warning: {warning}", file=sys.stderr)
         kind = f"animated {result.frames}f" if result.animated else "static"
         print(f"[{index + 1}/{len(sources)}] {source}: {kind}, {result.size // 1024} KB")
-        if cover_source is None:
-            cover_source = result.data
-        sticker_files.append((sticker_filename(len(sticker_files)), result.data))
+        converted.append((result.animated, result.data))
 
-    if not sticker_files:
+    if not converted:
         print("error: no stickers were produced", file=sys.stderr)
         return 1
 
-    archive = build_archive(
-        args.title, args.author, sticker_files, build_cover(cover_source)
-    )
-    with open(args.output, "wb") as handle:
-        handle.write(archive)
-    print(
-        f"wrote {args.output} "
-        f"({len(sticker_files)} stickers, {len(archive) // 1024} KB)"
-        + (f", {failures} skipped" if failures else "")
-    )
+    # WhatsApp packs are 3-30 stickers and never mix animated with static.
+    groups = []
+    for animated in (True, False):
+        members = [data for is_animated, data in converted if is_animated is animated]
+        cursor = 0
+        for size in plan_pack_sizes(len(members)):
+            groups.append((animated, members[cursor : cursor + size]))
+            cursor += size
+
+    written = []
+    for number, (animated, members) in enumerate(groups, start=1):
+        if len(members) < config.MIN_STICKERS:
+            print(
+                f"warning: a {'animated' if animated else 'static'} pack has only {len(members)} "
+                f"sticker(s); WhatsApp needs at least {config.MIN_STICKERS}",
+                file=sys.stderr,
+            )
+        title = args.title if len(groups) == 1 else f"{args.title} ({number}/{len(groups)})"
+        sticker_files = [(sticker_filename(i), data) for i, data in enumerate(members)]
+        archive = build_archive(title, args.author, sticker_files, build_cover(members[0]))
+        path = args.output
+        if len(groups) > 1:
+            stem, dot, ext = args.output.rpartition(".")
+            path = f"{stem}-{number}.{ext}" if dot else f"{args.output}-{number}"
+        with open(path, "wb") as handle:
+            handle.write(archive)
+        written.append(path)
+        print(f"wrote {path} ({len(members)} stickers, {len(archive) // 1024} KB)")
+
+    if failures:
+        print(f"{failures} source(s) skipped", file=sys.stderr)
     return 0
 
 

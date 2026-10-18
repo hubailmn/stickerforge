@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -18,7 +19,7 @@ from PIL import Image
 from . import config, video
 from .converter import RESAMPLE, convert, ensure_webp
 from .fetcher import FetchError, fetch
-from .pack import build_archive, build_cover, sticker_filename
+from .pack import build_archive, build_cover, plan_pack_sizes, sticker_filename
 
 
 class ExpiringStore:
@@ -133,6 +134,7 @@ def _serialize(record: dict, warnings=None) -> dict:
         "count": len(items),
         "max_stickers": config.MAX_STICKERS,
         "total_bytes": sum(s["size"] for s in record["stickers"]),
+        "animated": bool(record.get("animated")),
         "cover_url": f"/api/pack/{record['id']}/cover.png",
         "download_url": f"/api/pack/{record['id']}/download",
         "stickers": items,
@@ -231,7 +233,8 @@ def create_app() -> Flask:
             return label, None, None, str(exc)
 
     def gather_inputs():
-        urls = [p.strip() for p in re.split(r"[\s,]+", request.form.get("urls", "")) if p.strip()]
+        raw = [p.strip() for p in re.split(r"[\s,]+", request.form.get("urls", "")) if p.strip()]
+        urls = list(dict.fromkeys(raw))  # same link twice counts once, order kept
         uploads = [f for f in request.files.getlist("files") if f and f.filename]
         return [("url", u) for u in urls] + [("upload", f) for f in uploads]
 
@@ -245,12 +248,12 @@ def create_app() -> Flask:
         if not inputs:
             return jsonify(error="Add at least one image, GIF, or video URL/file."), 400
         warnings = []
-        if len(inputs) > config.MAX_STICKERS:
+        if len(inputs) > config.MAX_SOURCES:
             warnings.append(
-                f"Only the first {config.MAX_STICKERS} sources were kept "
-                f"({len(inputs) - config.MAX_STICKERS} ignored)."
+                f"Only the first {config.MAX_SOURCES} sources were kept "
+                f"({len(inputs) - config.MAX_SOURCES} ignored)."
             )
-            inputs = inputs[: config.MAX_STICKERS]
+            inputs = inputs[: config.MAX_SOURCES]
 
         results = []
         # map() keeps input order while the downloads overlap.
@@ -293,10 +296,26 @@ def create_app() -> Flask:
         except (FetchError, ValueError) as exc:
             return None, str(exc)
 
-    def build_record(title, author, jobs, warnings):
+    def build_packs(title, author, jobs, warnings):
+        """Convert jobs and split them into WhatsApp-sized packs.
+
+        Identical inputs are converted once. Animated and static stickers never
+        share a pack (WhatsApp rejects mixed packs), and each pack holds at most
+        MAX_STICKERS stickers.
+        """
+        seen_content = {}
+        unique_jobs = []
+        for job in jobs:
+            digest = hashlib.sha256(job["data"]).hexdigest()
+            if digest in seen_content:
+                warnings.append(f"{job['label']}: duplicate of {seen_content[digest]}, skipped")
+                continue
+            seen_content[digest] = job["label"]
+            unique_jobs.append(job)
+
         stickers = []
-        # pool.map preserves job order, so the pack keeps the requested order.
-        for job, (result, error) in zip(jobs, convert_pool.map(convert_job, jobs)):
+        # pool.map preserves job order, so packs keep the requested order.
+        for job, (result, error) in zip(unique_jobs, convert_pool.map(convert_job, unique_jobs)):
             if error is not None:
                 warnings.append(f"{job['label']}: {error}")
                 continue
@@ -319,17 +338,36 @@ def create_app() -> Flask:
             for warning in result.warnings:
                 warnings.append(f"{job['label']}: {warning}")
         if not stickers:
-            return None
-        record = {
-            "id": secrets.token_hex(8),
-            "title": title,
-            "author": author,
-            "stickers": stickers,
-            "order": [s["sid"] for s in stickers],
-            "cover": stickers[0]["sid"],
-        }
-        packs.put(record["id"], record, nbytes=_pack_bytes(record))
-        return record
+            return []
+
+        groups = []
+        for animated in (True, False):
+            members = [s for s in stickers if s["animated"] is animated]
+            cursor = 0
+            for size in plan_pack_sizes(len(members)):
+                groups.append((animated, members[cursor : cursor + size]))
+                cursor += size
+
+        records = []
+        for index, (animated, members) in enumerate(groups, start=1):
+            if len(members) < config.MIN_STICKERS:
+                warnings.append(
+                    f"A {'animated' if animated else 'static'} pack has only {len(members)} "
+                    f"sticker(s); WhatsApp needs at least {config.MIN_STICKERS} per pack."
+                )
+            pack_title = title if len(groups) == 1 else f"{title} ({index}/{len(groups)})"
+            record = {
+                "id": secrets.token_hex(8),
+                "title": pack_title,
+                "author": author,
+                "stickers": members,
+                "order": [s["sid"] for s in members],
+                "cover": members[0]["sid"],
+                "animated": animated,
+            }
+            packs.put(record["id"], record, nbytes=_pack_bytes(record))
+            records.append(record)
+        return records
 
     def as_int(value, default):
         try:
@@ -375,9 +413,9 @@ def create_app() -> Flask:
             warnings = []
             jobs = []
             inputs = gather_inputs()
-            if len(inputs) > config.MAX_STICKERS:
-                warnings.append(f"Only the first {config.MAX_STICKERS} sources were used.")
-                inputs = inputs[: config.MAX_STICKERS]
+            if len(inputs) > config.MAX_SOURCES:
+                warnings.append(f"Only the first {config.MAX_SOURCES} sources were used.")
+                inputs = inputs[: config.MAX_SOURCES]
             for kind, item in inputs:
                 label = item if kind == "url" else item.filename
                 try:
@@ -397,10 +435,17 @@ def create_app() -> Flask:
 
         if not jobs:
             return jsonify(error="Add at least one image, GIF, or video.", warnings=warnings), 400
-        record = build_record(title, author, jobs, warnings)
-        if record is None:
+        records = build_packs(title, author, jobs, warnings)
+        if not records:
             return jsonify(error="No stickers could be created.", warnings=warnings), 400
-        return jsonify(_serialize(record, warnings))
+        return jsonify(
+            {
+                "packs": [_serialize(record) for record in records],
+                "total_stickers": sum(len(r["stickers"]) for r in records),
+                "max_per_pack": config.MAX_STICKERS,
+                "warnings": warnings,
+            }
+        )
 
     @app.get("/api/pack/<pack_id>/sticker/<sid>.webp")
     def api_sticker(pack_id, sid):

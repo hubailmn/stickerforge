@@ -2,6 +2,9 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   sources: [],
+  packs: [],
+  packIndex: 0,
+  warnings: [],
   packId: null,
   stickers: [],
   order: [],
@@ -11,6 +14,8 @@ const state = {
 };
 
 const FPS_CHOICES = [5, 8, 10, 12, 15, 20, 24, 30];
+const MAX_PER_PACK = 30; // WhatsApp: 3 to 30 stickers per pack, never mixed animated/static
+const MIN_PER_PACK = 3;
 
 function h(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -53,13 +58,21 @@ function setStatus(message, kind) {
 
 async function addSources() {
   const files = Array.from($("files").files);
-  const urls = $("urls").value.trim();
-  if (!files.length && !urls) {
+  const typed = $("urls").value.trim();
+  if (!files.length && !typed) {
     setStatus("Paste a URL or choose a file first.", "error");
     return;
   }
+  // The same link twice is one source.
+  const requested = [...new Set(typed.split(/[\s,]+/).filter(Boolean))];
+  const fresh = requested.filter((url) => !state.sources.some((source) => source.label === url));
+  if (!files.length && !fresh.length) {
+    setStatus("Those links are already in your sources.", "error");
+    return;
+  }
+  const skipped = requested.length - fresh.length;
   const form = new FormData();
-  form.append("urls", urls);
+  form.append("urls", fresh.join("\n"));
   const local = {};
   for (const file of files) {
     const objectUrl = URL.createObjectURL(file);
@@ -89,8 +102,9 @@ async function addSources() {
     $("urls").value = "";
     $("files").value = "";
     renderSources();
+    const note = skipped ? ` ${skipped} duplicate link${skipped === 1 ? "" : "s"} skipped.` : "";
     setStatus(
-      `Added ${data.sources.length} source${data.sources.length === 1 ? "" : "s"}.`,
+      `Added ${data.sources.length} source${data.sources.length === 1 ? "" : "s"}.${note}`,
       "ok"
     );
     if (data.warnings && data.warnings.length) {
@@ -119,7 +133,39 @@ function metaLine(source) {
   return bits.join(" \u00b7 ");
 }
 
+// Estimate before building: each source is one sticker. The server's build
+// response is authoritative for the final packs.
+function renderCounter() {
+  const node = $("counter");
+  node.innerHTML = "";
+  const total = state.sources.length;
+  if (!total) return;
+  let animated = 0;
+  let statics = 0;
+  for (const source of state.sources) {
+    const isAnimated = (source.kind === "video" || source.animated) && source.keep_animation !== false;
+    if (isAnimated) animated++;
+    else statics++;
+  }
+  let packs = 0;
+  const problems = [];
+  for (const [label, count] of [["animated", animated], ["static", statics]]) {
+    if (!count) continue;
+    packs += Math.ceil(count / MAX_PER_PACK);
+    if (count < MIN_PER_PACK) problems.push(`${count} ${label} sticker${count === 1 ? "" : "s"} (WhatsApp needs ${MIN_PER_PACK})`);
+  }
+  node.append(
+    h("strong", {}, `${total} sticker${total === 1 ? "" : "s"}`),
+    ` \u00b7 ${packs} pack${packs === 1 ? "" : "s"}`,
+    h("span", { class: "counter-sub" }, ` (${animated} animated, ${statics} static)`)
+  );
+  if (problems.length) {
+    node.append(h("div", { class: "counter-warn" }, "Too few for a valid pack: " + problems.join(", ")));
+  }
+}
+
 function renderSources() {
+  renderCounter();
   const list = $("sources");
   list.innerHTML = "";
   if (!state.sources.length) {
@@ -162,6 +208,7 @@ function sourceCard(source, index) {
           checked: source.keep_animation !== false,
           onchange: (event) => {
             source.keep_animation = event.target.checked;
+            renderCounter();
           },
         }),
         h("span", {}, "Keep animation")
@@ -336,14 +383,18 @@ async function build() {
       setStatus(data.error || "Build failed.", "error");
       return;
     }
-    state.packId = data.pack_id;
-    state.stickers = data.stickers;
-    state.order = data.stickers.map((s) => s.sid);
-    state.cover = (data.stickers.find((s) => s.cover) || data.stickers[0]).sid;
-    state.title = data.title;
-    state.author = data.author;
-    render(data);
-    setStatus(`Built ${data.count} sticker${data.count === 1 ? "" : "s"}.`, "ok");
+    state.packs = data.packs;
+    state.packIndex = 0;
+    state.packId = null;
+    state.warnings = data.warnings || [];
+    renderPackList();
+    selectPack(0);
+    const total = data.total_stickers;
+    const count = data.packs.length;
+    setStatus(
+      `Built ${total} sticker${total === 1 ? "" : "s"} in ${count} pack${count === 1 ? "" : "s"}.`,
+      "ok"
+    );
   } catch (error) {
     setStatus("Network error: " + error.message, "error");
   } finally {
@@ -351,17 +402,70 @@ async function build() {
   }
 }
 
+// Keep edits (order, cover) on the pack object so switching packs keeps them.
+function saveCurrentPack() {
+  const pack = state.packs[state.packIndex];
+  // Only save when the editor state belongs to this pack (not right after a build).
+  if (!pack || pack.pack_id !== state.packId) return;
+  pack.stickers = state.stickers;
+  pack.order = state.order;
+  pack.cover = state.cover;
+}
+
+function selectPack(index) {
+  saveCurrentPack();
+  const pack = state.packs[index];
+  if (!pack) return;
+  state.packIndex = index;
+  state.packId = pack.pack_id;
+  state.stickers = pack.stickers;
+  state.order = pack.order || pack.stickers.map((s) => s.sid);
+  state.cover = pack.cover || (pack.stickers.find((s) => s.cover) || pack.stickers[0]).sid;
+  state.title = pack.title;
+  state.author = pack.author;
+  render(pack);
+  renderPackList();
+}
+
+function renderPackList() {
+  const box = $("packList");
+  box.innerHTML = "";
+  state.packs.forEach((pack, index) => {
+    box.append(
+      h(
+        "div",
+        { class: "pack-row" + (index === state.packIndex ? " active" : "") },
+        h("img", { src: pack.cover_url, alt: "" }),
+        h(
+          "div",
+          { class: "pack-row-meta" },
+          h("div", { class: "pack-row-title" }, pack.title),
+          h(
+            "div",
+            { class: "pack-row-sub" },
+            `${pack.count} ${pack.animated ? "animated" : "static"} \u00b7 ${fmtBytes(pack.total_bytes)}` +
+              (pack.count < MIN_PER_PACK ? " \u00b7 too few" : "")
+          )
+        ),
+        h("button", { class: "mini", type: "button", title: "Preview this pack", onclick: () => selectPack(index) }, "View"),
+        h("a", { class: "mini link", href: pack.download_url, title: "Download .wastickers" }, "\u2193")
+      )
+    );
+  });
+}
+
 function render(data) {
   $("result").hidden = false;
   $("packTitle").textContent = state.title;
   $("packAuthor").textContent = state.author ? "by " + state.author : "no author set";
-  $("packStats").textContent = `${data.count}/${data.max_stickers} stickers \u00b7 ${fmtBytes(data.total_bytes)}`;
+  const packBytes = state.stickers.reduce((sum, s) => sum + s.size, 0);
+  $("packStats").textContent = `${state.stickers.length}/${MAX_PER_PACK} stickers \u00b7 ${fmtBytes(packBytes)}`;
   $("coverImg").src = data.cover_url;
   $("packIcon").src = data.cover_url;
 
   const warnings = $("warnings");
   warnings.innerHTML = "";
-  (data.warnings || []).forEach((text) => warnings.append(h("div", { class: "warn" }, text)));
+  state.warnings.forEach((text) => warnings.append(h("div", { class: "warn" }, text)));
 
   $("chat").innerHTML = '<div class="bubble in">Tap a sticker below to drop it into the chat.</div>';
   renderTray();
@@ -464,6 +568,7 @@ function setCover(sid) {
   $("packIcon").src = url;
   renderTray();
   renderList();
+  renderPackList();
   persistOrder();
 }
 

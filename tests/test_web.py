@@ -62,7 +62,7 @@ class WebTests(unittest.TestCase):
             },
         )
         self.assertEqual(build.status_code, 200, build.data)
-        result = build.get_json()
+        result = build.get_json()["packs"][0]
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["title"], "From analyze")
 
@@ -85,7 +85,7 @@ class WebTests(unittest.TestCase):
             "/api/build", data=data, content_type="multipart/form-data"
         )
         self.assertEqual(response.status_code, 200, response.data)
-        payload = response.get_json()
+        payload = response.get_json()["packs"][0]
         self.assertEqual(payload["title"], "Demo")
         self.assertEqual(payload["count"], 1)
         sid = payload["stickers"][0]["sid"]
@@ -123,7 +123,7 @@ class WebTests(unittest.TestCase):
         response = self.client.post(
             "/api/build", data=data, content_type="multipart/form-data"
         )
-        payload = response.get_json()
+        payload = response.get_json()["packs"][0]
         self.assertEqual(payload["count"], 2)
         first, second = payload["stickers"][0]["sid"], payload["stickers"][1]["sid"]
 
