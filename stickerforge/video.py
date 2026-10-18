@@ -90,32 +90,9 @@ def _probe_with_ffmpeg(path: str):
 
 def probe(path: str) -> dict:
     """Return width, height, fps and duration (seconds) for a video file."""
-    duration = fps = width = height = None
-    reader = None
-    try:
-        import imageio_ffmpeg
-
-        reader = imageio_ffmpeg.read_frames(path)
-        meta = next(reader)
-        size = meta.get("size") or (0, 0)
-        width, height = int(size[0] or 0), int(size[1] or 0)
-        fps = meta.get("fps")
-        duration = meta.get("duration")
-    except Exception:
-        pass
-    finally:
-        if reader is not None:
-            try:
-                reader.close()
-            except Exception:
-                pass
-
-    if not (duration and fps and width and height):
-        d, f, w, h = _probe_with_ffmpeg(path)
-        duration = duration or d
-        fps = fps or f
-        width = width or w
-        height = height or h
+    # One ffmpeg process reports everything we need (ffmpeg_exe() already falls
+    # back to the bundled imageio-ffmpeg binary).
+    duration, fps, width, height = _probe_with_ffmpeg(path)
 
     if not width or not height:
         raise VideoError("could not read video metadata")

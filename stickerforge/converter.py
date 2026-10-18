@@ -113,10 +113,15 @@ def _subsample(
     return subset, merged
 
 
-def _save_webp(frames: List[Image.Image], durations: List[int], quality: int) -> bytes:
+def _save_webp(
+    frames: List[Image.Image],
+    durations: List[int],
+    quality: int,
+    method: int = config.WEBP_METHOD,
+) -> bytes:
     buffer = io.BytesIO()
     if len(frames) == 1:
-        frames[0].save(buffer, format="WEBP", quality=quality, method=config.WEBP_METHOD)
+        frames[0].save(buffer, format="WEBP", quality=quality, method=method)
     else:
         frames[0].save(
             buffer,
@@ -126,28 +131,48 @@ def _save_webp(frames: List[Image.Image], durations: List[int], quality: int) ->
             duration=durations,
             loop=0,
             quality=quality,
-            method=config.WEBP_METHOD,
-            minimize_size=True,
+            method=method,
         )
     return buffer.getvalue()
 
 
-def _encode_ladder(
+def _best_animated_fit(
     frames: List[Image.Image],
     durations: List[int],
     max_bytes: int,
-    ladder: Tuple[int, ...] = config.QUALITY_LADDER,
+    floor: Optional[bytes] = None,
 ) -> Optional[bytes]:
-    """Try a descending quality ladder, returning the first encode that fits.
+    """Highest quality that fits `max_bytes`, or None.
 
-    This is the fast path: most stickers fit on the first or second try, so we
-    usually pay for a single WebP encode instead of a full bisection.
+    Bisects quality with the fast encoder, then re-encodes the winning quality
+    with the slower, smaller one if that still fits.
+    `floor` is an optional already-encoded result at SEARCH_QUALITY_MIN.
     """
-    for quality in ladder:
-        data = _save_webp(frames, durations, quality)
-        if len(data) <= max_bytes:
-            return data
-    return None
+    lo = config.SEARCH_QUALITY_MIN
+    lo_size_bytes = floor if floor is not None else _save_webp(
+        frames, durations, lo, config.SEARCH_METHOD
+    )
+    if len(lo_size_bytes) > max_bytes:
+        return None
+    best_quality, best = lo, lo_size_bytes
+
+    hi = config.QUALITY_MAX
+    top = _save_webp(frames, durations, hi, config.SEARCH_METHOD)
+    if len(top) <= max_bytes:
+        best_quality, best = hi, top
+    else:
+        bad = hi
+        while bad - lo > 2:
+            mid = (lo + bad) // 2
+            data = _save_webp(frames, durations, mid, config.SEARCH_METHOD)
+            if len(data) <= max_bytes:
+                best_quality, best = mid, data
+                lo = mid
+            else:
+                bad = mid
+
+    final = _save_webp(frames, durations, best_quality, config.WEBP_METHOD)
+    return final if len(final) <= max_bytes else best
 
 
 def _bisect_quality(
@@ -190,11 +215,20 @@ def _encode_static(frame: Image.Image, max_bytes: int) -> bytes:
 def _encode_animated(
     frames: List[Image.Image], durations: List[int], max_bytes: int
 ) -> Tuple[bytes, int]:
+    # One cheap probe estimates how many frames fit the budget, so we skip frame
+    # steps that are clearly too large instead of searching each of them.
+    probe = _save_webp(frames, durations, config.PROBE_QUALITY, config.SEARCH_METHOD)
+    per_frame = max(len(probe) / len(frames), 1.0)
+    budget = max_bytes / per_frame * config.FRAME_BUDGET_SLACK
     for step in config.FRAME_STEPS:
         subset, merged = _subsample(frames, durations, step)
         if len(subset) < 2:
             break
-        data = _encode_ladder(subset, merged, max_bytes)
+        if len(subset) > budget and step != config.FRAME_STEPS[-1]:
+            continue
+        # The probe already encoded every frame at the floor quality.
+        floor = probe if step == 1 else None
+        data = _best_animated_fit(subset, merged, max_bytes, floor)
         if data is not None:
             return data, len(subset)
     fallback = _save_webp(frames, durations, config.QUALITY_MIN)

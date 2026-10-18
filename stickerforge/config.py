@@ -27,11 +27,18 @@ QUALITY_MAX = 90
 STATIC_QUALITY_MIN = 10
 STATIC_QUALITY_MAX = 95
 QUALITY_BISECT_STEPS = 6
-WEBP_METHOD = 4
-QUALITY_LADDER = (85, 75, 65, 55, 45, 35, 25, 15, 8)
+WEBP_METHOD = 4  # final encode: best compression
+SEARCH_METHOD = 0  # quality search: ~4x faster than method 4
+SEARCH_QUALITY_MIN = 8
+PROBE_QUALITY = 8  # lowest search quality: the feasibility limit
+# Skip frame steps whose estimated size is more than this many times the budget.
+FRAME_BUDGET_SLACK = 1.2
 FRAME_STEPS = (1, 2, 3, 4, 6, 8, 12)
 
 FETCH_TIMEOUT = 30
+FETCH_WORKERS = 8  # concurrent downloads/probes per request pool
+BUILD_WORKERS = max(1, min(3, os.cpu_count() or 1))  # concurrent conversions
+STORE_MAX_BYTES = 768 * 1024 * 1024  # total in-memory cache for sources + packs
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 USER_AGENT = "StickerForge/1.0"
 

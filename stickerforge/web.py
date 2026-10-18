@@ -8,6 +8,9 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
@@ -19,31 +22,56 @@ from .pack import build_archive, build_cover, sticker_filename
 
 
 class ExpiringStore:
-    """Bounded, expiring, in-memory store."""
+    """Bounded in-memory store that expires entries and caps total bytes.
 
-    def __init__(self, ttl: int = 3600, max_items: int = 256):
-        self._items = {}
+    Entries are kept in insertion (= creation) order, so expiry and eviction
+    both work from the front in O(1) per entry.
+    """
+
+    def __init__(
+        self,
+        ttl: int = 3600,
+        max_items: int = 256,
+        max_bytes: int = config.STORE_MAX_BYTES,
+    ):
+        self._items: "OrderedDict[str, tuple]" = OrderedDict()  # key -> (created, nbytes, value)
         self._lock = threading.Lock()
         self._ttl = ttl
         self._max_items = max_items
+        self._max_bytes = max_bytes
+        self._total_bytes = 0
 
-    def _gc(self) -> None:
+    def _remove(self, key: str) -> None:
+        _, nbytes, _ = self._items.pop(key)
+        self._total_bytes -= nbytes
+
+    def _evict(self) -> None:
         now = time.time()
-        for key in [k for k, v in self._items.items() if now - v.get("created", 0) > self._ttl]:
-            self._items.pop(key, None)
-        while len(self._items) >= self._max_items:
-            oldest = min(self._items.items(), key=lambda kv: kv[1].get("created", 0))[0]
-            self._items.pop(oldest, None)
+        while self._items:
+            key, (created, _, _) = next(iter(self._items.items()))
+            expired = now - created > self._ttl
+            over = len(self._items) > self._max_items or self._total_bytes > self._max_bytes
+            if not (expired or over):
+                break
+            self._remove(key)
 
-    def put(self, key: str, value: dict) -> None:
+    def put(self, key: str, value: dict, nbytes: int = 0) -> None:
         with self._lock:
-            self._gc()
-            value["created"] = time.time()
-            self._items[key] = value
+            if key in self._items:
+                self._remove(key)
+            self._items[key] = (time.time(), nbytes, value)
+            self._total_bytes += nbytes
+            self._evict()
 
     def get(self, key: str):
         with self._lock:
-            return self._items.get(key)
+            entry = self._items.get(key)
+            if entry is None:
+                return None
+            if time.time() - entry[0] > self._ttl:
+                self._remove(key)
+                return None
+            return entry[2]
 
 
 def _slugify(text: str) -> str:
@@ -51,16 +79,7 @@ def _slugify(text: str) -> str:
     return slug or "pack"
 
 
-def _image_thumb(data: bytes, size: int = 256):
-    try:
-        image = Image.open(io.BytesIO(data))
-        try:
-            image.seek(0)
-        except Exception:
-            pass
-        frame = image.convert("RGBA")
-    except Exception:
-        return None
+def _png_on_canvas(frame: Image.Image, size: int) -> bytes:
     scale = min(size / frame.width, size / frame.height)
     width = max(1, round(frame.width * scale))
     height = max(1, round(frame.height * scale))
@@ -70,6 +89,19 @@ def _image_thumb(data: bytes, size: int = 256):
     buffer = io.BytesIO()
     canvas.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _image_thumb(data: bytes, size: int = 256) -> Optional[bytes]:
+    try:
+        image = Image.open(io.BytesIO(data))
+        try:
+            image.seek(0)
+        except Exception:
+            pass
+        frame = image.convert("RGBA")
+    except Exception:
+        return None
+    return _png_on_canvas(frame, size)
 
 
 def _serialize(record: dict, warnings=None) -> dict:
@@ -108,11 +140,32 @@ def _serialize(record: dict, warnings=None) -> dict:
     }
 
 
+def _pack_bytes(record: dict) -> int:
+    return sum(len(s["data"]) for s in record["stickers"])
+
+
+def _cover_png(record: dict) -> bytes:
+    """Pack cover, rendered once per cover choice and cached on the record."""
+    by_sid = {s["sid"]: s for s in record["stickers"]}
+    source = by_sid.get(record["cover"]) or record["stickers"][0]
+    cached = record.get("_cover")
+    if cached and cached[0] == source["sid"]:
+        return cached[1]
+    png = build_cover(source["data"])
+    record["_cover"] = (source["sid"], png)
+    return png
+
+
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config["MAX_CONTENT_LENGTH"] = config.MAX_DOWNLOAD_BYTES * config.MAX_STICKERS
     packs = ExpiringStore()
     sources = ExpiringStore()
+    # Conversion is CPU-bound (WebP encoding). A shared, bounded pool keeps
+    # concurrent builds from oversubscribing the CPU or memory.
+    convert_pool = ThreadPoolExecutor(max_workers=config.BUILD_WORKERS, thread_name_prefix="convert")
+    # Fetching and probing are mostly I/O, so they get their own pool.
+    io_pool = ThreadPoolExecutor(max_workers=config.FETCH_WORKERS, thread_name_prefix="fetch")
 
     def analyze_bytes(data: bytes, label: str) -> dict:
         image = None
@@ -161,6 +214,22 @@ def create_app() -> Flask:
             "label": label,
         }
 
+    def load_input(kind: str, item) -> bytes:
+        """Read one input. URLs are web input, so local paths are never allowed."""
+        if kind == "url":
+            return fetch(item, allow_local=False)
+        return item.read(config.MAX_DOWNLOAD_BYTES + 1)
+
+    def analyze_input(kind: str, item):
+        label = item if kind == "url" else item.filename
+        try:
+            data = load_input(kind, item)
+            if len(data) > config.MAX_DOWNLOAD_BYTES:
+                raise FetchError("upload exceeds size limit")
+            return label, data, analyze_bytes(data, label), None
+        except (FetchError, ValueError) as exc:
+            return label, None, None, str(exc)
+
     def gather_inputs():
         urls = [p.strip() for p in re.split(r"[\s,]+", request.form.get("urls", "")) if p.strip()]
         uploads = [f for f in request.files.getlist("files") if f and f.filename]
@@ -184,22 +253,18 @@ def create_app() -> Flask:
             inputs = inputs[: config.MAX_STICKERS]
 
         results = []
-        for kind, item in inputs:
-            label = item if kind == "url" else item.filename
-            try:
-                if kind == "url":
-                    data = fetch(item)
-                else:
-                    data = item.read(config.MAX_DOWNLOAD_BYTES + 1)
-                    if len(data) > config.MAX_DOWNLOAD_BYTES:
-                        raise FetchError("upload exceeds size limit")
-                info = analyze_bytes(data, label)
-            except (FetchError, ValueError) as exc:
-                warnings.append(str(exc))
+        # map() keeps input order while the downloads overlap.
+        for label, data, info, error in io_pool.map(lambda pair: analyze_input(*pair), inputs):
+            if error is not None:
+                warnings.append(error)
                 continue
             sid = secrets.token_hex(8)
             thumb = info.pop("thumb", None)
-            sources.put(sid, {"data": data, "thumb": thumb, "info": info})
+            sources.put(
+                sid,
+                {"data": data, "thumb": thumb, "info": info},
+                nbytes=len(data) + len(thumb or b""),
+            )
             results.append({"sid": sid, **info, "thumb_url": f"/api/source/{sid}/thumb.png"})
         if not results:
             return jsonify(error="Nothing could be read.", warnings=warnings), 400
@@ -214,21 +279,26 @@ def create_app() -> Flask:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    def convert_job(job):
+        try:
+            return convert(
+                job["data"],
+                padding=job["padding"],
+                max_frames=job["max_frames"],
+                keep_animation=job["keep_animation"],
+                trim_start=job.get("trim_start"),
+                trim_end=job.get("trim_end"),
+                fps=job.get("fps"),
+            ), None
+        except (FetchError, ValueError) as exc:
+            return None, str(exc)
+
     def build_record(title, author, jobs, warnings):
         stickers = []
-        for job in jobs:
-            try:
-                result = convert(
-                    job["data"],
-                    padding=job["padding"],
-                    max_frames=job["max_frames"],
-                    keep_animation=job["keep_animation"],
-                    trim_start=job.get("trim_start"),
-                    trim_end=job.get("trim_end"),
-                    fps=job.get("fps"),
-                )
-            except (FetchError, ValueError) as exc:
-                warnings.append(f"{job['label']}: {exc}")
+        # pool.map preserves job order, so the pack keeps the requested order.
+        for job, (result, error) in zip(jobs, convert_pool.map(convert_job, jobs)):
+            if error is not None:
+                warnings.append(f"{job['label']}: {error}")
                 continue
             stickers.append(
                 {
@@ -258,7 +328,7 @@ def create_app() -> Flask:
             "order": [s["sid"] for s in stickers],
             "cover": stickers[0]["sid"],
         }
-        packs.put(record["id"], record)
+        packs.put(record["id"], record, nbytes=_pack_bytes(record))
         return record
 
     def as_int(value, default):
@@ -311,7 +381,7 @@ def create_app() -> Flask:
             for kind, item in inputs:
                 label = item if kind == "url" else item.filename
                 try:
-                    data = fetch(item) if kind == "url" else item.read(config.MAX_DOWNLOAD_BYTES + 1)
+                    data = load_input(kind, item)
                 except FetchError as exc:
                     warnings.append(f"{label}: {exc}")
                     continue
@@ -349,9 +419,7 @@ def create_app() -> Flask:
         record = packs.get(pack_id)
         if not record:
             abort(404)
-        by_sid = {s["sid"]: s for s in record["stickers"]}
-        source = by_sid.get(record["cover"]) or record["stickers"][0]
-        response = send_file(io.BytesIO(build_cover(source["data"])), mimetype="image/png")
+        response = send_file(io.BytesIO(_cover_png(record)), mimetype="image/png")
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -363,9 +431,8 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         known = {s["sid"] for s in record["stickers"]}
         order = [sid for sid in payload.get("order", []) if sid in known]
-        for sticker in record["stickers"]:
-            if sticker["sid"] not in order:
-                order.append(sticker["sid"])
+        seen = set(order)
+        order.extend(s["sid"] for s in record["stickers"] if s["sid"] not in seen)
         record["order"] = order
         cover = payload.get("cover")
         if cover in known:
@@ -382,12 +449,11 @@ def create_app() -> Flask:
         sticker_files = [
             (sticker_filename(i), sticker["data"]) for i, sticker in enumerate(ordered)
         ]
-        cover_source = by_sid.get(record["cover"]) or ordered[0]
         archive = build_archive(
             record["title"],
             record["author"],
             sticker_files,
-            build_cover(cover_source["data"]),
+            _cover_png(record),
         )
         return send_file(
             io.BytesIO(archive),
