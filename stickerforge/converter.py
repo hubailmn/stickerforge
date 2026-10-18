@@ -116,7 +116,7 @@ def _subsample(
 def _save_webp(frames: List[Image.Image], durations: List[int], quality: int) -> bytes:
     buffer = io.BytesIO()
     if len(frames) == 1:
-        frames[0].save(buffer, format="WEBP", quality=quality, method=6)
+        frames[0].save(buffer, format="WEBP", quality=quality, method=config.WEBP_METHOD)
     else:
         frames[0].save(
             buffer,
@@ -126,11 +126,28 @@ def _save_webp(frames: List[Image.Image], durations: List[int], quality: int) ->
             duration=durations,
             loop=0,
             quality=quality,
-            method=6,
+            method=config.WEBP_METHOD,
             minimize_size=True,
-            allow_mixed=True,
         )
     return buffer.getvalue()
+
+
+def _encode_ladder(
+    frames: List[Image.Image],
+    durations: List[int],
+    max_bytes: int,
+    ladder: Tuple[int, ...] = config.QUALITY_LADDER,
+) -> Optional[bytes]:
+    """Try a descending quality ladder, returning the first encode that fits.
+
+    This is the fast path: most stickers fit on the first or second try, so we
+    usually pay for a single WebP encode instead of a full bisection.
+    """
+    for quality in ladder:
+        data = _save_webp(frames, durations, quality)
+        if len(data) <= max_bytes:
+            return data
+    return None
 
 
 def _bisect_quality(
@@ -177,7 +194,7 @@ def _encode_animated(
         subset, merged = _subsample(frames, durations, step)
         if len(subset) < 2:
             break
-        data = _bisect_quality(subset, merged, max_bytes, config.QUALITY_MIN, config.QUALITY_MAX)
+        data = _encode_ladder(subset, merged, max_bytes)
         if data is not None:
             return data, len(subset)
     fallback = _save_webp(frames, durations, config.QUALITY_MIN)
