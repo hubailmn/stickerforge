@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StickerForge Collector
 // @namespace    https://github.com/hubailmn/stickerforge
-// @version      1.0.0
+// @version      1.0.1
 // @description  Click GIFs on GIPHY/Tenor to stack their links. Alt+Shift+C copies the stack to the clipboard and clears it.
 // @match        https://giphy.com/*
 // @match        https://*.giphy.com/*
@@ -17,7 +17,7 @@
   "use strict";
 
   const STACK_KEY = "sf_stack";
-  const MAX_ITEMS = 30; // matches WhatsApp's pack limit
+  const MAX_ITEMS = 120; // matches the web app source cap; packs are split on import
   // Only media from these hosts is collected.
   const MEDIA_HOST = /^(media\d*\.giphy\.com|i\.giphy\.com|media\d*\.tenor\.com|c\.tenor\.com)$/i;
 
