@@ -103,6 +103,40 @@ def _read_frames(im: Image.Image, max_frames: int) -> Tuple[List[Image.Image], L
     return _limit_frames(frames, durations, max_frames)
 
 
+def _frame_durations(count: int, fps: float) -> List[int]:
+    """Per-frame durations (ms) whose sum is exactly round(count * 1000 / fps).
+
+    Rounding each frame separately drifts: 70 frames at 7 fps would come to
+    10.01 s instead of 10 s.
+    """
+    durations = []
+    for index in range(count):
+        start = round(index * 1000 / fps)
+        end = round((index + 1) * 1000 / fps)
+        durations.append(max(end - start, config.MIN_FRAME_DURATION_MS))
+    return durations
+
+
+def _fit_to_duration(
+    frames: List[Image.Image], durations: List[int], max_ms: int
+) -> Tuple[List[Image.Image], List[int], bool]:
+    """Keep the leading frames whose durations sum to at most `max_ms`.
+
+    WhatsApp rejects animations longer than its limit ("invalid animation
+    duration"), so this runs before encoding. Returns whether frames were cut.
+    """
+    total = 0
+    keep = 0
+    for duration in durations:
+        if total + duration > max_ms:
+            break
+        total += duration
+        keep += 1
+    keep = max(keep, 1)
+    trimmed = keep < len(frames)
+    return frames[:keep], durations[:keep], trimmed
+
+
 def _subsample(
     frames: List[Image.Image], durations: List[int], step: int
 ) -> Tuple[List[Image.Image], List[int]]:
@@ -251,6 +285,14 @@ def _finalize_animated(
     warnings: List[str],
     source_kind: str,
 ) -> StickerResult:
+    fitted, durations, trimmed = _fit_to_duration(
+        fitted, durations, config.WHATSAPP_MAX_DURATION_MS
+    )
+    if trimmed:
+        warnings.append(
+            f"{clips}animation trimmed to {config.WHATSAPP_MAX_DURATION_MS // 1000}s "
+            "(WhatsApp's animation limit)"
+        )
     encoded, count = _encode_animated(fitted, durations, config.ANIMATED_MAX_BYTES)
     if len(encoded) <= config.ANIMATED_MAX_BYTES:
         if count < len(fitted):
@@ -356,8 +398,7 @@ def _convert_video(
             static = _encode_static(_fit(frames[0], size, padding), config.STATIC_MAX_BYTES)
             return StickerResult(static, size, size, False, 1, True, warnings, "video")
 
-        frame_ms = max(int(round(1000 / target_fps)), config.MIN_FRAME_DURATION_MS)
-        durations = [frame_ms] * len(frames)
+        durations = _frame_durations(len(frames), target_fps)
         fitted = [_fit(frame, size, padding) for frame in frames]
         return _finalize_animated(fitted, durations, "", warnings, "video")
     finally:

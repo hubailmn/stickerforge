@@ -193,3 +193,81 @@ class PackSplitTests(unittest.TestCase):
         result = self.build([("one.gif", blob), ("two.gif", blob)])
         self.assertEqual(result["total_stickers"], 1)
         self.assertTrue(any("duplicate" in w for w in result["warnings"]))
+
+
+def webp_frame_durations(data):
+    """Read per-frame durations (ms) straight from the WebP container.
+
+    Each ANMF chunk holds a 3-byte duration after 12 bytes of frame position
+    and size, so this does not depend on how Pillow exposes them.
+    """
+    import struct
+
+    assert data[:4] == b"RIFF" and data[8:12] == b"WEBP", "not a WebP file"
+    durations = []
+    offset = 12
+    while offset + 8 <= len(data):
+        tag = data[offset : offset + 4]
+        size = struct.unpack("<I", data[offset + 4 : offset + 8])[0]
+        body = offset + 8
+        if tag == b"ANMF":
+            durations.append(int.from_bytes(data[body + 12 : body + 15], "little"))
+        offset = body + size + (size & 1)
+    return durations
+
+
+class AnimationDurationTests(unittest.TestCase):
+    def test_frame_durations_sum_exactly(self):
+        from stickerforge.converter import _frame_durations
+
+        for fps in (5, 7, 8, 12, 15, 24, 29.97, 30):
+            for count in (1, 10, 70, 90):
+                total = sum(_frame_durations(count, fps))
+                self.assertEqual(total, round(count * 1000 / fps))
+
+    def test_long_gif_is_trimmed_under_ten_seconds(self):
+        import io
+
+        from PIL import Image
+
+        from stickerforge.converter import convert
+
+        frames = [Image.new("RGBA", (120, 120), (i * 3, 80, 200, 255)) for i in range(60)]
+        buffer = io.BytesIO()
+        # 60 frames x 400 ms = 24 s, well over WhatsApp's 10 s limit.
+        frames[0].save(buffer, format="GIF", save_all=True, append_images=frames[1:], duration=400, loop=0)
+        result = convert(buffer.getvalue())
+        self.assertTrue(result.animated)
+        durations = webp_frame_durations(result.data)
+        self.assertGreater(len(durations), 1)
+        self.assertLessEqual(sum(durations), 10000)
+        self.assertTrue(all(d >= 8 for d in durations))
+        self.assertTrue(any("trimmed" in w for w in result.warnings))
+
+    def test_video_at_awkward_fps_stays_under_ten_seconds(self):
+        import os
+        import tempfile
+
+        from stickerforge import video
+        from stickerforge.converter import convert
+
+        if not video.ffmpeg_available():
+            self.skipTest("ffmpeg unavailable")
+        fd, path = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
+        try:
+            import subprocess
+
+            subprocess.run(
+                [video.ffmpeg_exe(), "-v", "error", "-y", "-f", "lavfi", "-i",
+                 "testsrc2=size=160x120:rate=30:duration=10", "-c:v", "libx264",
+                 "-pix_fmt", "yuv420p", path],
+                check=True,
+            )
+            with open(path, "rb") as handle:
+                data = handle.read()
+        finally:
+            os.unlink(path)
+        result = convert(data, trim_start=0, trim_end=10, fps=7)
+        durations = webp_frame_durations(result.data)
+        self.assertLessEqual(sum(durations), 10000)
