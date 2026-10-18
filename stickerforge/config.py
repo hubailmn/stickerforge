@@ -1,0 +1,37 @@
+"""Central limits and defaults for StickerForge.
+
+Limits mirror the WhatsApp preset used by laggykiller/sticker-convert
+(resources/compression.json): 512x512, 100 KB static / 500 KB animated,
+1..30 fps, quality 0..100, duration <= 10000 ms.
+"""
+
+import os
+
+STICKER_SIZE = 512
+COVER_SIZE = 96
+STATIC_MAX_BYTES = 100 * 1024
+ANIMATED_MAX_BYTES = 500 * 1024
+MAX_STICKERS = 30
+MAX_FRAMES = 90
+DEFAULT_PADDING = 8
+MIN_FRAME_DURATION_MS = 20
+DEFAULT_FRAME_DURATION_MS = 80
+
+WHATSAPP_MAX_DURATION_MS = 10000
+WHATSAPP_MAX_FPS = 30
+MIN_TARGET_FPS = 5
+DEFAULT_TARGET_FPS = 15
+
+QUALITY_MIN = 0
+QUALITY_MAX = 90
+STATIC_QUALITY_MIN = 10
+STATIC_QUALITY_MAX = 95
+QUALITY_BISECT_STEPS = 6
+FRAME_STEPS = (1, 2, 3, 4, 6, 8, 12)
+
+FETCH_TIMEOUT = 30
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+USER_AGENT = "StickerForge/1.0"
+
+ALLOW_PRIVATE_HOSTS = os.environ.get("STICKERFORGE_ALLOW_PRIVATE_HOSTS", "0") == "1"
+FFMPEG_PATH = os.environ.get("STICKERFORGE_FFMPEG", "")

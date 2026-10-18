@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StickerForge — WhatsApp sticker packs</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Sticker<span>Forge</span></div>
+  <div class="tagline">GIFs, images &amp; videos &rarr; WhatsApp sticker packs</div>
+</header>
+
+<main class="layout">
+  <section class="panel">
+    <h2>1 &middot; Add sources</h2>
+    <label class="field">
+      <span>URLs <em>images, GIFs, or video (mp4/webm/mov), one per line</em></span>
+      <textarea id="urls" rows="4" placeholder="https://example.com/cat.gif&#10;https://example.com/clip.mp4"></textarea>
+    </label>
+    <label class="field">
+      <span>or upload files</span>
+      <input id="files" type="file" accept="image/*,video/*,.gif,.webp,.png,.jpg,.jpeg,.mp4,.mov,.webm" multiple>
+    </label>
+    <button id="add" class="secondary">Add sources</button>
+    <p id="status" class="status"></p>
+
+    <div id="sources" class="sources"></div>
+
+    <details class="advanced">
+      <summary>Pack options</summary>
+      <div class="row">
+        <label class="field"><span>Pack title</span><input id="title" type="text" value="My Pack"></label>
+        <label class="field"><span>Author</span><input id="author" type="text" placeholder="your name"></label>
+      </div>
+      <div class="row">
+        <label class="field"><span>Padding (px)</span><input id="padding" type="number" min="0" max="120" value="8"></label>
+        <label class="field"><span>Max frames</span><input id="maxFrames" type="number" min="1" max="150" value="90"></label>
+      </div>
+    </details>
+
+    <button id="build" class="primary">Build pack</button>
+  </section>
+
+  <section class="panel">
+    <h2>2 &middot; Preview in WhatsApp</h2>
+    <div class="phone">
+      <div class="wa-top">
+        <div class="wa-avatar"></div>
+        <div class="wa-title">
+          Pack preview
+          <small>tap a sticker to send it</small>
+        </div>
+      </div>
+      <div class="wa-body" id="chat">
+        <div class="bubble in">Add sources, then tap a sticker below to drop it into the chat.</div>
+      </div>
+      <div class="wa-tray">
+        <div class="wa-tray-head">
+          <img id="packIcon" class="pack-icon" alt="">
+          <span class="tray-hint">Sticker picker &middot; drag to reorder &middot; click a sticker&#39;s star to set the cover</span>
+        </div>
+        <div id="tray" class="tray-grid"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="result" hidden>
+    <h2>3 &middot; Export</h2>
+    <div class="pack-head">
+      <img id="coverImg" class="cover" alt="pack cover">
+      <div>
+        <div id="packTitle" class="pack-title"></div>
+        <div id="packAuthor" class="pack-author"></div>
+        <div id="packStats" class="pack-stats"></div>
+      </div>
+    </div>
+    <div id="warnings" class="warnings"></div>
+    <button id="download" class="primary">Download .wastickers</button>
+    <ol id="list" class="list"></ol>
+  </section>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
