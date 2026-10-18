@@ -10,3 +10,4 @@ dist/
 .DS_Store
 *.wastickers
 !tests/fixtures/*.wastickers
+.env
