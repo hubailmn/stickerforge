@@ -17,9 +17,9 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
 
 from . import config, video
-from .converter import RESAMPLE, convert, ensure_webp
+from .converter import RESAMPLE, as_animated, as_static, convert, ensure_webp
 from .fetcher import FetchError, fetch
-from .pack import build_archive, build_cover, plan_pack_sizes, sticker_filename
+from .pack import build_archive, build_cover, plan_pack_sizes, resolve_kinds, sticker_filename
 
 
 class ExpiringStore:
@@ -339,6 +339,23 @@ def create_app() -> Flask:
                 warnings.append(f"{job['label']}: {warning}")
         if not stickers:
             return []
+
+        # A lone sticker of one kind would be an unimportable pack: move it to the
+        # other kind where that is possible.
+        flags, changed, notes = resolve_kinds([s["animated"] for s in stickers])
+        for index in changed:
+            sticker = stickers[index]
+            if flags[index]:
+                sticker["data"] = as_animated(sticker["data"])
+                sticker["frames"] = 2
+            else:
+                sticker["data"] = as_static(sticker["data"])
+                sticker["frames"] = 1
+            sticker["animated"] = flags[index]
+            sticker["size"] = len(sticker["data"])
+            sticker["max_bytes"] = config.ANIMATED_MAX_BYTES if flags[index] else config.STATIC_MAX_BYTES
+            sticker["fits"] = sticker["size"] <= sticker["max_bytes"]
+        warnings.extend(notes)
 
         groups = []
         for animated in (True, False):

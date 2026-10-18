@@ -70,3 +70,37 @@ def plan_pack_sizes(count: int, max_size: int = config.MAX_STICKERS) -> List[int
     packs = -(-count // max_size)  # ceiling division
     base, extra = divmod(count, packs)
     return [base + 1] * extra + [base] * (packs - extra)
+
+
+def resolve_kinds(animated_flags: List[bool]) -> Tuple[List[bool], List[int], List[str]]:
+    """Decide the final animated/static kind of each sticker so every pack can import.
+
+    WhatsApp needs at least MIN_STICKERS per pack and never mixes kinds, so a
+    lone sticker of one kind is moved into the other kind when that is possible.
+    Returns (new_flags, changed_indexes, notes).
+    """
+    flags = list(animated_flags)
+    static_idx = [i for i, animated in enumerate(flags) if not animated]
+    animated_idx = [i for i, animated in enumerate(flags) if animated]
+    changed: List[int] = []
+    notes: List[str] = []
+
+    if 0 < len(static_idx) < config.MIN_STICKERS and animated_idx:
+        # Static -> animated keeps the picture; it just gets a short two-frame loop.
+        for index in static_idx:
+            flags[index] = True
+            changed.append(index)
+        notes.append(
+            f"{len(static_idx)} static sticker(s) became short animations so they can join "
+            "the animated pack (WhatsApp packs cannot mix static and animated stickers)"
+        )
+    elif 0 < len(animated_idx) < config.MIN_STICKERS and len(static_idx) >= config.MIN_STICKERS:
+        # Animated -> static is lossy, so it is only done when unavoidable.
+        for index in animated_idx:
+            flags[index] = False
+            changed.append(index)
+        notes.append(
+            f"{len(animated_idx)} animated sticker(s) were saved as static so they can form a "
+            f"valid pack (WhatsApp needs at least {config.MIN_STICKERS} per pack)"
+        )
+    return flags, changed, notes

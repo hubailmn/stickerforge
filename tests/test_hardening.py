@@ -177,6 +177,7 @@ class PackSplitTests(unittest.TestCase):
         self.assertTrue(all(p["animated"] for p in result["packs"]))
 
     def test_static_and_animated_are_never_mixed_in_a_pack(self):
+        # Two statics next to two animations: the statics join the animated pack.
         files = [
             ("s1.png", _unique_png(1)),
             ("s2.png", _unique_png(2)),
@@ -184,9 +185,14 @@ class PackSplitTests(unittest.TestCase):
             ("a2.gif", _unique_gif(2)),
         ]
         result = self.build(files)
-        kinds = sorted((p["animated"], p["count"]) for p in result["packs"])
-        self.assertEqual(kinds, [(False, 2), (True, 2)])
-        self.assertTrue(any("at least 3" in w for w in result["warnings"]))
+        self.assertEqual([(p["animated"], p["count"]) for p in result["packs"]], [(True, 4)])
+
+    def test_mixed_packs_only_when_both_kinds_are_big_enough(self):
+        files = [(f"a{i}.gif", _unique_gif(i)) for i in range(3)] + [
+            (f"s{i}.png", _unique_png(i)) for i in range(3)
+        ]
+        result = self.build(files)
+        self.assertEqual(sorted((p["animated"], p["count"]) for p in result["packs"]), [(False, 3), (True, 3)])
 
     def test_identical_content_is_converted_once(self):
         blob = _unique_gif(5)
@@ -271,3 +277,64 @@ class AnimationDurationTests(unittest.TestCase):
         result = convert(data, trim_start=0, trim_end=10, fps=7)
         durations = webp_frame_durations(result.data)
         self.assertLessEqual(sum(durations), 10000)
+
+
+class ResolveKindsTests(unittest.TestCase):
+    def test_lone_static_joins_animated_pack(self):
+        from stickerforge.pack import resolve_kinds
+
+        flags, changed, notes = resolve_kinds([True] * 30 + [False])
+        self.assertTrue(all(flags))
+        self.assertEqual(changed, [30])
+        self.assertTrue(notes)
+
+    def test_two_statics_join_animated_pack(self):
+        from stickerforge.pack import resolve_kinds
+
+        flags, changed, _ = resolve_kinds([True, True, True, False, False])
+        self.assertEqual(flags, [True] * 5)
+        self.assertEqual(changed, [3, 4])
+
+    def test_lone_animated_flattens_only_when_static_pack_needs_it(self):
+        from stickerforge.pack import resolve_kinds
+
+        flags, changed, notes = resolve_kinds([True, False, False, False])
+        self.assertEqual(flags, [False] * 4)
+        self.assertEqual(changed, [0])
+        self.assertTrue(notes)
+
+    def test_valid_mixes_are_left_alone(self):
+        from stickerforge.pack import resolve_kinds
+
+        flags, changed, notes = resolve_kinds([True] * 3 + [False] * 3)
+        self.assertEqual(flags, [True] * 3 + [False] * 3)
+        self.assertEqual(changed, [])
+        self.assertEqual(notes, [])
+
+
+class LoneStaticWebTests(unittest.TestCase):
+    def test_lone_png_becomes_animated_in_the_same_pack(self):
+        import io
+
+        files = [(f"a{i}.gif", _unique_gif(i)) for i in range(4)] + [("s.png", _unique_png(9))]
+        data = {"title": "Mix", "files": [(io.BytesIO(blob), name) for name, blob in files]}
+        response = app.test_client().post("/api/build", data=data, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 200, response.data)
+        result = response.get_json()
+        self.assertEqual(len(result["packs"]), 1)
+        pack = result["packs"][0]
+        self.assertEqual(pack["count"], 5)
+        self.assertTrue(pack["animated"])
+        self.assertTrue(all(s["animated"] for s in pack["stickers"]))
+        self.assertFalse(any("pack has only" in w for w in result["warnings"]))
+        promoted = [s for s in pack["stickers"] if s["source"] == "s.png"][0]
+        self.assertTrue(promoted["animated"])
+
+
+class AsAnimatedTests(unittest.TestCase):
+    def test_as_animated_has_two_frames_and_valid_duration(self):
+        from stickerforge.converter import as_animated, convert
+
+        still = convert(_unique_png(4), keep_animation=False).data
+        animated = as_animated(still)
+        self.assertEqual(webp_frame_durations(animated), [500, 500])

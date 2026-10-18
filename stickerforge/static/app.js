@@ -147,6 +147,14 @@ function renderCounter() {
     if (isAnimated) animated++;
     else statics++;
   }
+  // Same rule as the server: a lone sticker of one kind joins the other kind.
+  if (statics > 0 && statics < MIN_PER_PACK && animated > 0) {
+    animated += statics;
+    statics = 0;
+  } else if (animated > 0 && animated < MIN_PER_PACK && statics >= MIN_PER_PACK) {
+    statics += animated;
+    animated = 0;
+  }
   let packs = 0;
   const problems = [];
   for (const [label, count] of [["animated", animated], ["static", statics]]) {

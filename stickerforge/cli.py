@@ -6,9 +6,9 @@ import argparse
 import sys
 
 from . import config
-from .converter import convert
+from .converter import as_animated, as_static, convert
 from .fetcher import FetchError, fetch
-from .pack import build_archive, build_cover, plan_pack_sizes, sticker_filename
+from .pack import build_archive, build_cover, plan_pack_sizes, resolve_kinds, sticker_filename
 
 
 def _read_list_file(path: str):
@@ -78,6 +78,15 @@ def main(argv=None) -> int:
     if not converted:
         print("error: no stickers were produced", file=sys.stderr)
         return 1
+
+    # A lone sticker of one kind would be an unimportable pack: move it to the
+    # other kind where that is possible.
+    flags, changed, notes = resolve_kinds([animated for animated, _ in converted])
+    for index in changed:
+        data = converted[index][1]
+        converted[index] = (flags[index], as_animated(data) if flags[index] else as_static(data))
+    for note in notes:
+        print(f"note: {note}", file=sys.stderr)
 
     # WhatsApp packs are 3-30 stickers and never mix animated with static.
     groups = []

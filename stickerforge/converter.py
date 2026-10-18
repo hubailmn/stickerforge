@@ -429,3 +429,29 @@ def convert(
     return _convert_video(
         data, padding, max_frames, keep_animation, size, trim_start, trim_end, fps
     )
+
+
+def as_animated(sticker: bytes) -> bytes:
+    """Turn a static sticker into a short two-frame animation (same picture).
+
+    The encoder merges identical frames into one, which would leave a single-frame
+    file, so the second frame differs by one fully transparent-friendly pixel.
+    """
+    frame = Image.open(io.BytesIO(sticker))
+    frame.seek(0)
+    first = frame.convert("RGBA")
+    second = first.copy()
+    r, g, b, a = second.getpixel((0, 0))
+    second.putpixel((0, 0), (r, g, b, a - 1 if a > 0 else 1))
+    frames = [first, second]
+    data = _save_webp(frames, [500, 500], config.STATIC_QUALITY_MAX)
+    if len(data) > config.ANIMATED_MAX_BYTES:
+        data = _save_webp(frames, [500, 500], config.STATIC_QUALITY_MIN)
+    return data
+
+
+def as_static(sticker: bytes) -> bytes:
+    """Keep only the first frame of an animated sticker."""
+    frame = Image.open(io.BytesIO(sticker))
+    frame.seek(0)
+    return _encode_static(frame.convert("RGBA"), config.STATIC_MAX_BYTES)
