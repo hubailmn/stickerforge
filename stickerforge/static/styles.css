@@ -21,15 +21,29 @@ body {
 
 .topbar {
   display: flex;
-  align-items: baseline;
-  gap: 14px;
-  padding: 18px 26px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: clamp(24px, 3vw, 40px) 22px;
   background: linear-gradient(120deg, var(--wa-dark), var(--wa-green));
   color: #fff;
 }
-.brand { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+.brand {
+  margin: 0;
+  font-size: clamp(28px, 3vw, 40px);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
 .brand span { color: #9be7c4; }
-.tagline { font-size: 13px; opacity: 0.85; }
+.tagline {
+  max-width: 48ch;
+  margin: 0;
+  font-size: clamp(14px, 1.25vw, 16px);
+  line-height: 1.5;
+  text-wrap: pretty;
+  opacity: 0.85;
+}
 
 .layout {
   display: grid;
